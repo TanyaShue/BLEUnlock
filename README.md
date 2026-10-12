@@ -15,6 +15,7 @@ This document is also available in [Japanese (日本語版はこちら)](README.
 
 - No iPhone app is required
 - Works with any BLE devices that periodically transmits signal from [static MAC address](#notes-on-mac-address)
+- Tracks devices with rotating (random) addresses — such as phones — by advertisement fingerprint, with a custom name
 - Unlocks your Mac for you when the BLE device is near your Mac, without entering password
 - Locks your Mac when the BLE device is away from your Mac
 - Optionally runs your own script upon lock/unlock
@@ -91,6 +92,33 @@ Finally, from the menu bar icon, select *Device*.
 It starts scanning nearby BLE devices.
 Select your device, and you're done!
 
+## Tracking a Device by Fingerprint
+
+Phones use a rotating random BLE address and usually advertise without a name, so they show up as
+anonymous UUIDs. For such devices you can instead track the stable parts of their advertisement
+("fingerprint"):
+
+1. Open the menu bar icon → *Device list*;
+2. Click *Track Device by Fingerprint…* at the bottom of the list;
+3. Pick your device under *Nearby device* to auto-fill the fingerprint fields, or enter at least
+   one criterion manually: **manufacturer data prefix**, **service data prefix**, or **service UUID**;
+4. Give it a **custom name** (e.g. "My Phone") and click *Save*;
+5. Check the new entry in the device list to include it in proximity unlock/lock like any other device.
+
+Notes:
+
+- Any matching criterion identifies the device; the most specific fingerprint wins. Very short
+  manufacturer prefixes may match unrelated devices (e.g. `4c00` matches all Apple devices), so
+  prefer the value auto-filled from the nearby-device picker (e.g. `750002` for Samsung beacons).
+- Fingerprint devices are tracked from advertisement RSSI only — BLEUnlock never connects to them,
+  so they don't consume a Bluetooth connection or affect audio.
+- Phones advertise intermittently. If this causes frequent "signal lost" locks, increase
+  *Timeout* (up to 10 minutes).
+- Saved fingerprint devices stay in the list even when not detected. Use the *Manage Fingerprint
+  Devices* submenu to edit or delete them.
+- If you are migrating fingerprints from bt_monitor in the BLE folder: `mf_prefix` maps to
+  "manufacturer prefix" and `sd_prefix` maps to "service data prefix".
+
 ## Options
 
 Option | Description
@@ -116,6 +144,10 @@ Set Minimum RSSI | Devices with RSSI below this value will not be displayed in t
 
 If your BLE device is not from Apple, BLEUnlock may not able to find the device name.
 If that is the case, your device is displayed as a UUID (long hexadecimal numbers and hyphens).
+If the device uses a rotating (random) address, such as a phone, track it with *Track Device by
+Fingerprint…* at the bottom of the device list instead — see
+[Tracking a Device by Fingerprint](#tracking-a-device-by-fingerprint).
+
 To identify the device, try moving the device closer to or farther away from the Mac and see if the RSSI (dB value) changes accordingly.
 
 If you don't see *any* device in the list, try resetting the Bluetooth module as described below.

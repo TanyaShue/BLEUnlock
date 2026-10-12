@@ -1,6 +1,11 @@
 # Release Notes
 
 
+## 1.15.0
+
+- **New:** Track devices with rotating (random) addresses, such as phones, by advertisement fingerprint. Add one from the bottom of the device list: pick a nearby device or enter manufacturer-data / service-data / service-UUID criteria manually, set a custom name, then monitor it like any other device for proximity unlock/lock.
+
+
 ## 1.14.4
 
 - **Fix:** GATT device-info connections during scanning are now limited to monitored devices (or devices whose name/MAC matches a monitored device), connected one at a time with per-device backoff. This prevents Bluetooth resource contention — such as audio dropouts — in environments with many nearby BLE devices.
