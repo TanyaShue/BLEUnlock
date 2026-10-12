@@ -64,3 +64,22 @@
 "wake_on_proximity" = "靠近唤醒";
 "wake_without_unlocking" = "唤醒时不需解锁";
 "pair_for_mac_hint" = "配对以稳定追踪随机地址 →";
+
+"fingerprint_add_device" = "按指纹追踪设备…";
+"fingerprint_manage_devices" = "管理指纹设备";
+"fingerprint_none" = "（暂无指纹设备）";
+"fingerprint_dialog_add_title" = "按指纹追踪设备";
+"fingerprint_dialog_edit_title" = "编辑指纹设备";
+"fingerprint_dialog_info" = "随机地址轮换的设备（如手机）可以用广播中的稳定特征来追踪。可从附近设备中选择自动填入，也可手动输入指纹。";
+"fingerprint_pick_device" = "附近设备";
+"fingerprint_pick_manual" = "手动输入";
+"fingerprint_field_name" = "自定义名称";
+"fingerprint_field_mf" = "厂商数据前缀";
+"fingerprint_field_sd" = "服务数据前缀";
+"fingerprint_field_uuid" = "服务 UUID";
+"fingerprint_hint" = "至少填写一项；任一项匹配即视为该设备，前缀越具体越准确（例如厂商前缀 750002）。";
+"fingerprint_save" = "保存";
+"fingerprint_delete" = "删除";
+"fingerprint_delete_confirm" = "确定删除这个指纹设备吗？";
+"fingerprint_rule_missing" = "请至少填写一项指纹（厂商数据 / 服务数据 / 服务 UUID）。";
+"fingerprint_default_name" = "指纹设备";

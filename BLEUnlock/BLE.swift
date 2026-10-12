@@ -120,6 +120,26 @@ class Device: NSObject {
     var lastNameDebugSnapshot: String?
     /// Timestamp of last MAC resolution attempt; used to throttle redundant lookups.
     var lastMACLookupTime: TimeInterval = 0
+    /// Non-nil when this entry is a user-defined fingerprint-tracked device
+    /// rather than a real CoreBluetooth peripheral. Its address rotates, so it
+    /// is matched by advertisement fingerprint instead of by UUID/MAC.
+    var fingerprint: DeviceFingerprint?
+    /// Latest manufacturer data (hex) seen in an advertisement (fingerprint aid).
+    var mfDataHex: String?
+    /// Latest service data entries, "uuid:hex" lowercased (fingerprint aid).
+    var serviceDataEntries: [String] = []
+    /// Latest advertised service UUIDs, lowercased (fingerprint aid).
+    var serviceUUIDs: [String] = []
+
+    var isFingerprintDevice: Bool { fingerprint != nil }
+
+    /// Remember the fingerprint-relevant parts of the latest advertisement.
+    func updateAdvertisementInfo(_ advertisementData: [String: Any]) {
+        let signature = AdvertisementSignature(advertisementData: advertisementData)
+        mfDataHex = signature.manufacturerHex
+        serviceDataEntries = signature.serviceDataEntries
+        serviceUUIDs = signature.serviceUUIDs
+    }
 
     func normalizedName(_ candidate: String?) -> String? {
         guard let candidate = candidate?.trimmingCharacters(in: .whitespaces), !candidate.isEmpty else { return nil }
@@ -168,6 +188,9 @@ class Device: NSObject {
     }
 
     func currentResolvedName() -> String? {
+        if let fingerprintName = normalizedName(fingerprint?.name) {
+            return fingerprintName
+        }
         let peripheralName = normalizedName(peripheral?.name)
         if let cachedName = normalizedName(blName),
            looksLikeTemporaryBroadcastName(cachedName),
@@ -447,6 +470,144 @@ class BLE: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
         return true
     }
 
+
+    // MARK: - Fingerprint-tracked devices
+
+    /// User-defined fingerprint profiles (persisted by AppDelegate).
+    var fingerprintProfiles: [DeviceFingerprint] = []
+
+    func setFingerprintProfiles(_ profiles: [DeviceFingerprint]) {
+        fingerprintProfiles = profiles
+        for device in devices.values where device.isFingerprintDevice {
+            if let profile = profiles.first(where: { $0.syntheticUUID == device.uuid }) {
+                device.fingerprint = profile
+                device.blName = profile.name
+            }
+        }
+    }
+
+    func fingerprintProfile(for uuid: UUID) -> DeviceFingerprint? {
+        fingerprintProfiles.first { $0.syntheticUUID == uuid }
+    }
+
+    /// Create (or refresh) the synthetic Device entry backing a profile, so the
+    /// device is listed even before its first matching advertisement arrives.
+    @discardableResult
+    func ensureFingerprintDevice(_ profile: DeviceFingerprint) -> Device {
+        let uuid = profile.syntheticUUID
+        if let existing = devices[uuid] {
+            existing.fingerprint = profile
+            existing.blName = profile.name
+            return existing
+        }
+        let device = Device(uuid: uuid)
+        device.fingerprint = profile
+        device.blName = profile.name
+        // rssi stays 0 ("no reading") until a matching advertisement arrives,
+        // so the list shows "signal not detected" rather than a fake value.
+        devices[uuid] = device
+        return device
+    }
+
+    func removeFingerprintDevice(_ uuid: UUID) {
+        if let state = monitoredStates.removeValue(forKey: uuid) {
+            stopMonitoring(state)
+        }
+        monitoredUUIDs.remove(uuid)
+        devices.removeValue(forKey: uuid)
+        gattInfoState.removeValue(forKey: uuid)
+    }
+
+    /// Best matching profile for an advertisement (0 = no match).
+    func bestMatchingFingerprintProfile(for advertisementData: [String: Any]) -> DeviceFingerprint? {
+        guard !fingerprintProfiles.isEmpty else { return nil }
+        let signature = AdvertisementSignature(advertisementData: advertisementData)
+        var best: (profile: DeviceFingerprint, score: Int)?
+        for profile in fingerprintProfiles {
+            let score = profile.matchScore(signature)
+            if score > 0, score > (best?.score ?? 0) {
+                best = (profile, score)
+            }
+        }
+        return best?.profile
+    }
+
+    /// Re-evaluate advertisements already seen against the current profiles so
+    /// a newly-added profile shows up immediately instead of on the next advert.
+    func refreshFingerprintMatches() {
+        guard !fingerprintProfiles.isEmpty else { return }
+        for source in devices.values where !source.isFingerprintDevice && source.isVisible && source.rssi < 0 {
+            let signature = AdvertisementSignature(manufacturerHex: source.mfDataHex,
+                                                   serviceDataEntries: source.serviceDataEntries,
+                                                   serviceUUIDs: source.serviceUUIDs)
+            var best: (profile: DeviceFingerprint, score: Int)?
+            for profile in fingerprintProfiles {
+                let score = profile.matchScore(signature)
+                if score > 0, score > (best?.score ?? 0) {
+                    best = (profile, score)
+                }
+            }
+            guard let profile = best?.profile, let device = devices[profile.syntheticUUID] else { continue }
+            device.peripheral = source.peripheral
+            device.rssi = source.rssi
+            device.isVisible = true
+            device.advData = source.advData
+            device.mfDataHex = source.mfDataHex
+            device.serviceDataEntries = source.serviceDataEntries
+            device.serviceUUIDs = source.serviceUUIDs
+            resetScanTimer(device: device)
+            if let state = monitoredStates[device.uuid], !monitoringSuspended {
+                state.peripheral = source.peripheral
+                updateMonitoredState(state, rssi: source.rssi)
+            }
+            DispatchQueue.main.async { [weak self] in self?.delegate?.updateDevice(device: device) }
+        }
+    }
+
+    /// Handle an advertisement matching a fingerprint profile. Such devices are
+    /// tracked purely from advertisements and are never connected (their random
+    /// address would be gone the moment we tried).
+    private func handleFingerprintAdvertisement(_ profile: DeviceFingerprint,
+                                                peripheral: CBPeripheral,
+                                                advertisementData: [String: Any],
+                                                rssi: Int) {
+        let uuid = profile.syntheticUUID
+        let device: Device
+        var isNew = false
+        if let existing = devices[uuid] {
+            device = existing
+            device.fingerprint = profile
+        } else {
+            isNew = true
+            device = Device(uuid: uuid)
+            device.fingerprint = profile
+            devices[uuid] = device
+        }
+        device.peripheral = peripheral
+        device.rssi = rssi
+        device.isVisible = true
+        device.blName = profile.name
+        device.advertisedLocalName = device.normalizedName(advertisementData[CBAdvertisementDataLocalNameKey] as? String) ?? device.advertisedLocalName
+        device.advData = advertisementData[CBAdvertisementDataManufacturerDataKey] as? Data ?? device.advData
+        device.updateAdvertisementInfo(advertisementData)
+        resetScanTimer(device: device)
+
+        if let state = monitoredStates[uuid], !monitoringSuspended {
+            state.peripheral = peripheral
+            updateMonitoredState(state, rssi: rssi)
+            // Deliberately no connectMonitoredPeripheral(): advertisement RSSI is
+            // the only reliable signal for an address that rotates.
+        }
+
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self else { return }
+            if isNew {
+                self.delegate?.newDevice(device: device)
+            } else {
+                self.delegate?.updateDevice(device: device)
+            }
+        }
+    }
 
     var presence = false
     var shouldLock = false
@@ -927,10 +1088,12 @@ class BLE: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
             guard let self = self, let device = device else { return }
             device.isVisible = false
             DispatchQueue.main.async { [weak self] in self?.delegate?.removeDevice(device: device) }
-            if let p = device.peripheral, !self.isMonitoring(uuid: device.uuid) {
+            if let p = device.peripheral, !self.isMonitoring(uuid: device.uuid), !device.isFingerprintDevice {
                 self.centralMgr.cancelPeripheralConnection(p)
             }
-            if !self.isMonitoring(uuid: device.uuid) {
+            // Fingerprint devices stay cached (listed as "not detected") because
+            // their profile is a persistent, user-defined entity.
+            if !self.isMonitoring(uuid: device.uuid), !device.isFingerprintDevice {
                 self.devices.removeValue(forKey: device.uuid)
                 self.gattInfoState.removeValue(forKey: device.uuid)
             }
@@ -948,6 +1111,22 @@ class BLE: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
                         rssi RSSI: NSNumber)
     {
         let rssi = RSSI.intValue >= 0 ? -100 : RSSI.intValue
+
+        // Fingerprint-tracked devices: match the advertisement payload directly,
+        // independent of the (rotating) random address. Explicit profiles take
+        // precedence over the normal UUID/MAC-based handling below, but never
+        // steal a peripheral that is itself a monitored / resolved real device.
+        if !fingerprintProfiles.isEmpty,
+           !isMonitoring(uuid: peripheral.identifier),
+           devices[peripheral.identifier]?.macAddr == nil,
+           let profile = bestMatchingFingerprintProfile(for: advertisementData) {
+            handleFingerprintAdvertisement(profile,
+                                           peripheral: peripheral,
+                                           advertisementData: advertisementData,
+                                           rssi: rssi)
+            return
+        }
+
         if let state = monitoredStates[peripheral.identifier], !monitoringSuspended {
             state.peripheral = peripheral
             updateMonitoredState(state, rssi: rssi)
@@ -1117,6 +1296,7 @@ class BLE: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
                 }
             }
             if let device = device {
+                device.updateAdvertisementInfo(advertisementData)
                 tryGATTConnectForInfo(peripheral)
                 resetScanTimer(device: device)
             }

@@ -64,3 +64,22 @@
 "wake_on_proximity" = "Wake on Proximity";
 "wake_without_unlocking" = "Wake without Unlocking";
 "pair_for_mac_hint" = "Pair to stabilize random address tracking →";
+
+"fingerprint_add_device" = "Track Device by Fingerprint…";
+"fingerprint_manage_devices" = "Manage Fingerprint Devices";
+"fingerprint_none" = "(No fingerprint devices)";
+"fingerprint_dialog_add_title" = "Track a Device by Its Fingerprint";
+"fingerprint_dialog_edit_title" = "Edit Fingerprint Device";
+"fingerprint_dialog_info" = "Devices with rotating (random) addresses, such as phones, can be tracked by the stable parts of their advertisements. Pick a nearby device to fill the fields, or enter a fingerprint manually.";
+"fingerprint_pick_device" = "Nearby device";
+"fingerprint_pick_manual" = "Manual input";
+"fingerprint_field_name" = "Custom name";
+"fingerprint_field_mf" = "Manufacturer prefix";
+"fingerprint_field_sd" = "Service data prefix";
+"fingerprint_field_uuid" = "Service UUID";
+"fingerprint_hint" = "At least one criterion is required. Any matching criterion identifies the device, so keep prefixes specific (e.g. manufacturer prefix 750002).";
+"fingerprint_save" = "Save";
+"fingerprint_delete" = "Delete";
+"fingerprint_delete_confirm" = "Delete this fingerprint device?";
+"fingerprint_rule_missing" = "Please provide at least one fingerprint criterion (manufacturer data, service data, or service UUID).";
+"fingerprint_default_name" = "Fingerprint Device";

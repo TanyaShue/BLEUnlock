@@ -161,6 +161,13 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenuItemVa
     var automaticUpdateChecksMenuItem: NSMenuItem?
     var deviceDict: [UUID: NSMenuItem] = [:]
     var deviceInsertionOrder: [UUID] = []
+
+    // Fingerprint-tracked devices (user-defined fingerprint + custom name)
+    var fingerprintProfiles: [DeviceFingerprint] = []
+    var fingerprintAddMenuItem: NSMenuItem?
+    var fingerprintManageMenuItem: NSMenuItem?
+    var fingerprintSectionSeparator: NSMenuItem?
+    let fingerprintManageMenu = NSMenu()
 struct DeviceMenuItemView {
     let checkbox: NSButton
     let label: NSTextField
@@ -215,6 +222,7 @@ struct DeviceMenuItemView {
             refreshDeviceMenuSelectionStates(removeStale: false)
             deviceMenuNeedsRefresh = false
             ensureGroupSeparatorExists()
+            refreshFingerprintManageMenu()
             performDeviceMenuReorder()
             deviceMenuIsOpen = true
             // Option-key toggle: check initial state before starting scan
@@ -320,7 +328,9 @@ struct DeviceMenuItemView {
 
         var desc : String!
         if showDetails {
-            if let mac = device.macAddr {
+            if let fingerprint = device.fingerprint {
+                desc = String(format: "%@ (%@) (%@)", device.description, fingerprint.criteriaSummary, uuidStr)
+            } else if let mac = device.macAddr {
                 let prettifiedMac = mac.replacingOccurrences(of: "-", with: ":").uppercased()
                 desc = String(format: "%@ (%@) (%@)", device.description, prettifiedMac, uuidStr)
             } else {
@@ -479,6 +489,28 @@ struct DeviceMenuItemView {
             si.isEnabled = false
             scanningMenuItem = si
         }
+        ensureFingerprintMenuItems()
+    }
+
+    /// Persistent device-list entries for the fingerprint section:
+    /// separator + "Track Device by Fingerprint…" + "Manage Fingerprint Devices".
+    func ensureFingerprintMenuItems() {
+        if fingerprintSectionSeparator == nil {
+            fingerprintSectionSeparator = NSMenuItem.separator()
+        }
+        if fingerprintAddMenuItem == nil {
+            let item = NSMenuItem(title: t("fingerprint_add_device"),
+                                  action: #selector(addFingerprintDevice(_:)),
+                                  keyEquivalent: "")
+            item.target = self
+            fingerprintAddMenuItem = item
+        }
+        if fingerprintManageMenuItem == nil {
+            let item = NSMenuItem(title: t("fingerprint_manage_devices"), action: nil, keyEquivalent: "")
+            item.submenu = fingerprintManageMenu
+            fingerprintManageMenuItem = item
+            refreshFingerprintManageMenu()
+        }
     }
 
     /// Persistent separator between monitored and unmonitored device groups.
@@ -529,6 +561,10 @@ struct DeviceMenuItemView {
         }
         desired.append(scanningMenuItem!)
         for (_, item) in unmonitoredAfter { desired.append(item) }
+        ensureFingerprintMenuItems()
+        if let separator = fingerprintSectionSeparator { desired.append(separator) }
+        if let addItem = fingerprintAddMenuItem { desired.append(addItem) }
+        if let manageItem = fingerprintManageMenuItem { desired.append(manageItem) }
 
         // Full rebuild: remove all items from index 2 (hint=0, fixed-sep=1)
         // and re-add in desired order. Safe because performDeviceMenuReorder
@@ -640,6 +676,9 @@ struct DeviceMenuItemView {
         return (title as NSString).size(withAttributes: attrs).width
     }
     func labelColorForDevice(uuid: UUID) -> NSColor {
+        if ble.devices[uuid]?.isFingerprintDevice == true {
+            return NSColor.controlTextColor
+        }
         let resolved = ble.devices[uuid]?.macAddr != nil
         guard !resolved else { return NSColor.controlTextColor }
         // disabledControlTextColor renders near-invisible in dark mode on macOS < 26
@@ -731,8 +770,15 @@ struct DeviceMenuItemView {
             let sepIdx = deviceMenu.index(of: sep)
             if ble.isMonitoring(uuid: uuid) {
                 deviceMenu.insertItem(item, at: sepIdx)
+            } else if let fpSeparator = fingerprintSectionSeparator {
+                let fpIndex = deviceMenu.index(of: fpSeparator)
+                if fpIndex >= 0 {
+                    // Unmonitored: keep above the fingerprint section
+                    deviceMenu.insertItem(item, at: fpIndex)
+                } else {
+                    deviceMenu.addItem(item)
+                }
             } else {
-                // Unmonitored: append to end; reorder fixes on menu close
                 deviceMenu.addItem(item)
             }
         } else {
@@ -742,6 +788,23 @@ struct DeviceMenuItemView {
     }
 
     func newDevice(device: Device) {
+        if device.isFingerprintDevice {
+            if let checkbox = deviceCheckboxDict[device.uuid] {
+                updateDeviceCheckbox(checkbox, uuid: device.uuid, title: menuItemTitle(device: device, showDetails: deviceMenuShowDetails))
+                updateMonitorStatusItems()
+            } else {
+                let menuItem = addDeviceMenuItem(title: "", uuid: device.uuid)
+                let checkbox = configureDeviceMenuView(menuItem, uuid: device.uuid, title: menuItemTitle(device: device, showDetails: deviceMenuShowDetails))
+                deviceDict[device.uuid] = menuItem
+                deviceCheckboxDict[device.uuid] = checkbox
+                if !deviceInsertionOrder.contains(device.uuid) {
+                    deviceInsertionOrder.append(device.uuid)
+                }
+                updateMonitorStatusItems()
+                scheduleDeviceMenuReorder()
+            }
+            return
+        }
         if let checkbox = deviceCheckboxDict[device.uuid] {
             updateDeviceCheckbox(checkbox, uuid: device.uuid, title: menuItemTitle(device: device, showDetails: deviceMenuShowDetails))
             updateMonitorStatusItems()
@@ -813,6 +876,22 @@ struct DeviceMenuItemView {
     }
     
     func updateDevice(device: Device) {
+        if device.isFingerprintDevice {
+            if let checkbox = deviceCheckboxDict[device.uuid] {
+                updateDeviceCheckbox(checkbox, uuid: device.uuid, title: menuItemTitle(device: device, showDetails: deviceMenuShowDetails))
+            } else {
+                let menuItem = addDeviceMenuItem(title: "", uuid: device.uuid)
+                let view = configureDeviceMenuView(menuItem, uuid: device.uuid, title: menuItemTitle(device: device, showDetails: deviceMenuShowDetails))
+                deviceDict[device.uuid] = menuItem
+                deviceCheckboxDict[device.uuid] = view
+                if !deviceInsertionOrder.contains(device.uuid) {
+                    deviceInsertionOrder.append(device.uuid)
+                }
+                scheduleDeviceMenuReorder()
+            }
+            updateMonitorStatusItems()
+            return
+        }
         macInheritLog("updateDevice: uuid=\(device.uuid.uuidString) mac=\(device.macAddr ?? "nil") isMonitored=\(ble.isMonitoring(uuid: device.uuid))")
         // MAC-based merge: unmonitored device that just resolved MAC matching a monitored one
         if !ble.isMonitoring(uuid: device.uuid), let mac = device.macAddr {
@@ -862,6 +941,13 @@ struct DeviceMenuItemView {
     }
     
     func removeDevice(device: Device) {
+        if device.isFingerprintDevice {
+            if let checkbox = deviceCheckboxDict[device.uuid] {
+                updateDeviceCheckbox(checkbox, uuid: device.uuid, title: menuItemTitleNotDetected(device: device))
+            }
+            updateMonitorStatusItems()
+            return
+        }
         if ble.isMonitoring(uuid: device.uuid) {
             if let checkbox = deviceCheckboxDict[device.uuid] {
                 let title: String
@@ -1021,13 +1107,13 @@ struct DeviceMenuItemView {
             let monitoring = ble.isMonitoring(uuid: uuid)
             menuItem.state = monitoring ? .on : .off
             if let device = ble.devices[uuid] {
-                if !monitoring && !device.isVisible {
+                if !monitoring && !device.isVisible && !device.isFingerprintDevice {
                     staleUUIDs.append(uuid)
                 } else if let checkbox = deviceCheckboxDict[uuid] {
                     updateDeviceCheckbox(checkbox, uuid: uuid, title: menuItemTitle(device: device, showDetails: deviceMenuShowDetails))
                 }
                 // Dedup: stale unmonitored if MAC/name matches a monitored device
-                if !monitoring, let device = ble.devices[uuid] {
+                if !monitoring, !device.isFingerprintDevice, let device = ble.devices[uuid] {
                     let hasMonitoredMAC: Bool = {
                         if let mac = device.macAddr {
                             let n = canonicalMAC(mac)
@@ -1077,6 +1163,9 @@ struct DeviceMenuItemView {
     func monitoredDeviceTitle(uuid: UUID) -> String {
         if let device = ble.devices[uuid] {
             return device.description
+        }
+        if let profile = fingerprintProfiles.first(where: { $0.syntheticUUID == uuid }) {
+            return profile.name
         }
         if let name = ble.monitoredStates[uuid]?.peripheral?.name?.trimmingCharacters(in: .whitespaces),
            !name.isEmpty {
@@ -1798,6 +1887,155 @@ struct DeviceMenuItemView {
         performDeviceMenuReorder()
     }
 
+    // MARK: - Fingerprint-tracked devices
+
+    @objc func addFingerprintDevice(_ sender: Any?) {
+        showFingerprintDialog(editing: nil)
+    }
+
+    @objc func editFingerprintDevice(_ sender: NSMenuItem) {
+        guard let id = sender.representedObject as? String,
+              let profile = fingerprintProfiles.first(where: { $0.id == id }) else { return }
+        showFingerprintDialog(editing: profile)
+    }
+
+    func refreshFingerprintManageMenu() {
+        fingerprintManageMenu.removeAllItems()
+        if fingerprintProfiles.isEmpty {
+            let empty = NSMenuItem(title: t("fingerprint_none"), action: nil, keyEquivalent: "")
+            empty.isEnabled = false
+            fingerprintManageMenu.addItem(empty)
+            return
+        }
+        for profile in fingerprintProfiles {
+            let item = NSMenuItem(title: profile.name, action: #selector(editFingerprintDevice(_:)), keyEquivalent: "")
+            item.target = self
+            item.representedObject = profile.id
+            item.toolTip = profile.criteriaSummary
+            fingerprintManageMenu.addItem(item)
+        }
+    }
+
+    /// Persist the given profiles and reconcile device-list entries with them.
+    func applyFingerprintProfiles(_ profiles: [DeviceFingerprint]) {
+        let previous = fingerprintProfiles
+        let newIDs = Set(profiles.map { $0.id })
+
+        fingerprintProfiles = profiles
+        FingerprintProfileStore.save(profiles)
+        ble.setFingerprintProfiles(profiles)
+
+        var removedMonitored = false
+        for old in previous where !newIDs.contains(old.id) {
+            let uuid = old.syntheticUUID
+            if ble.isMonitoring(uuid: uuid) { removedMonitored = true }
+            ble.removeFingerprintDevice(uuid)
+            if let menuItem = deviceDict.removeValue(forKey: uuid) {
+                menuItem.menu?.removeItem(menuItem)
+            }
+            deviceCheckboxDict.removeValue(forKey: uuid)
+            deviceInsertionOrder.removeAll { $0 == uuid }
+            deviceMaxTitleWidth.removeValue(forKey: uuid)
+        }
+        if removedMonitored {
+            saveMonitoredUUIDs(ble.monitoredUUIDs)
+            monitorDevices(uuids: ble.monitoredUUIDs)
+        }
+
+        for profile in profiles {
+            newDevice(device: ble.ensureFingerprintDevice(profile))
+        }
+        ble.refreshFingerprintMatches()
+        refreshFingerprintManageMenu()
+        refreshDeviceMenuSelectionStates()
+        updateMonitorStatusItems()
+        performDeviceMenuReorder()
+    }
+
+    /// Devices currently visible that expose usable advertisement fingerprint data.
+    func fingerprintCandidates() -> [Device] {
+        ble.devices.values
+            .filter { device in
+                !device.isFingerprintDevice && device.isVisible && device.rssi < 0 &&
+                    (device.mfDataHex != nil || !device.serviceDataEntries.isEmpty || !device.serviceUUIDs.isEmpty)
+            }
+            .sorted { $0.rssi > $1.rssi }
+    }
+
+    func showFingerprintDialog(editing: DeviceFingerprint?) {
+        let context = FingerprintDialogContext(candidatesProvider: { [weak self] in
+            self?.fingerprintCandidates() ?? []
+        })
+        if let profile = editing {
+            context.nameField.stringValue = profile.name
+            context.mfField.stringValue = profile.manufacturerPrefix ?? ""
+            context.sdField.stringValue = profile.serviceDataPrefix ?? ""
+            context.uuidField.stringValue = profile.serviceUUID ?? ""
+        }
+
+        // Keep scanning while the dialog is open so the device picker can be
+        // refreshed live; stopScanning() is a no-op while devices are monitored.
+        ble.startScanning()
+        defer { ble.stopScanning() }
+        NSApp.activate(ignoringOtherApps: true)
+        while true {
+            let alert = NSAlert()
+            alert.messageText = editing == nil ? t("fingerprint_dialog_add_title") : t("fingerprint_dialog_edit_title")
+            alert.informativeText = t("fingerprint_dialog_info")
+            alert.window.title = "BLEUnlock"
+            alert.addButton(withTitle: t("fingerprint_save"))
+            if editing != nil {
+                alert.addButton(withTitle: t("fingerprint_delete"))
+            }
+            alert.addButton(withTitle: t("cancel"))
+            alert.accessoryView = context.view
+            context.nameField.becomeFirstResponder()
+            let response = alert.runModal()
+
+            if response != .alertFirstButtonReturn {
+                if editing != nil, response == .alertSecondButtonReturn {
+                    let confirm = NSAlert()
+                    confirm.messageText = t("fingerprint_delete_confirm")
+                    confirm.informativeText = editing?.name ?? ""
+                    confirm.window.title = "BLEUnlock"
+                    confirm.addButton(withTitle: t("fingerprint_delete"))
+                    confirm.addButton(withTitle: t("cancel"))
+                    if confirm.runModal() == .alertFirstButtonReturn, let id = editing?.id {
+                        applyFingerprintProfiles(fingerprintProfiles.filter { $0.id != id })
+                    }
+                }
+                return
+            }
+
+            let manufacturer = DeviceFingerprint.normalizeManufacturerPrefix(context.mfField.stringValue)
+            let serviceData = DeviceFingerprint.normalizeServiceDataPrefix(context.sdField.stringValue)
+            let serviceUUID = DeviceFingerprint.normalizeServiceUUID(context.uuidField.stringValue)
+            guard manufacturer != nil || serviceData != nil || serviceUUID != nil else {
+                context.view.removeFromSuperview()
+                errorModal(t("fingerprint_rule_missing"))
+                continue
+            }
+
+            var name = context.nameField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+            if name.isEmpty { name = t("fingerprint_default_name") }
+
+            let profile = DeviceFingerprint(id: editing?.id ?? UUID().uuidString,
+                                            name: name,
+                                            manufacturerPrefix: manufacturer,
+                                            serviceDataPrefix: serviceData,
+                                            serviceUUID: serviceUUID,
+                                            createdAt: editing?.createdAt ?? Date().timeIntervalSince1970)
+            var profiles = fingerprintProfiles
+            if let index = profiles.firstIndex(where: { $0.id == profile.id }) {
+                profiles[index] = profile
+            } else {
+                profiles.append(profile)
+            }
+            applyFingerprintProfiles(profiles)
+            return
+        }
+    }
+
     func errorModal(_ msg: String, info: String? = nil) {
         let alert = NSAlert()
         alert.messageText = msg
@@ -2281,6 +2519,12 @@ struct DeviceMenuItemView {
         deviceMenu.addItem(scanItem)
         scanningMenuItem = scanItem
 
+        ensureFingerprintMenuItems()
+        if let separator = fingerprintSectionSeparator { deviceMenu.addItem(separator) }
+        if let addItem = fingerprintAddMenuItem { deviceMenu.addItem(addItem) }
+        if let manageItem = fingerprintManageMenuItem { deviceMenu.addItem(manageItem) }
+        refreshFingerprintManageMenu()
+
         let unlockSettingsItem = mainMenu.addItem(withTitle: t("unlock_settings"), action: nil, keyEquivalent: "")
         unlockSettingsItem.submenu = unlockSettingsMenu
         addSettingsItem(unlockSettingsMenu, title: t("any_short"), action: #selector(setUnlockDeviceLogic), tag: UnlockDeviceLogic.anyClose.rawValue, kind: unlockLogicMenuItemKind)
@@ -2513,6 +2757,14 @@ struct DeviceMenuItemView {
             constructMenu()
         }
         ble.delegate = self
+        fingerprintProfiles = FingerprintProfileStore.load()
+        if !fingerprintProfiles.isEmpty {
+            ble.setFingerprintProfiles(fingerprintProfiles)
+            for profile in fingerprintProfiles {
+                newDevice(device: ble.ensureFingerprintDevice(profile))
+            }
+        }
+        refreshFingerprintManageMenu()
         let monitoredUUIDs = loadMonitoredUUIDs()
         // Resolve MAC addresses for monitored devices at startup so cross-correlation works
         if !monitoredUUIDs.isEmpty {
@@ -2606,5 +2858,109 @@ struct DeviceMenuItemView {
     func applicationWillTerminate(_ aNotification: Notification) {
         permissionRecoveryTimer?.invalidate()
         permissionRecoveryTimer = nil
+    }
+}
+
+// MARK: - Fingerprint dialog accessory view
+
+private final class FingerprintDialogContext: NSObject, NSMenuDelegate {
+    let view = NSView(frame: NSRect(x: 0, y: 0, width: 470, height: 220))
+    let picker = NSPopUpButton(frame: NSRect(x: 158, y: 186, width: 300, height: 25), pullsDown: false)
+    let nameField = NSTextField(frame: NSRect(x: 158, y: 152, width: 300, height: 24))
+    let mfField = NSTextField(frame: NSRect(x: 158, y: 118, width: 300, height: 24))
+    let sdField = NSTextField(frame: NSRect(x: 158, y: 84, width: 300, height: 24))
+    let uuidField = NSTextField(frame: NSRect(x: 158, y: 50, width: 300, height: 24))
+    private let candidatesProvider: () -> [Device]
+    private(set) var candidates: [Device] = []
+
+    init(candidatesProvider: @escaping () -> [Device]) {
+        self.candidatesProvider = candidatesProvider
+        super.init()
+
+        view.addSubview(makeLabel(t("fingerprint_pick_device"), y: 186))
+        view.addSubview(makeLabel(t("fingerprint_field_name"), y: 152))
+        view.addSubview(makeLabel(t("fingerprint_field_mf"), y: 118))
+        view.addSubview(makeLabel(t("fingerprint_field_sd"), y: 84))
+        view.addSubview(makeLabel(t("fingerprint_field_uuid"), y: 50))
+
+        picker.target = self
+        picker.action = #selector(pickerChanged(_:))
+        picker.menu?.delegate = self
+        rebuildPickerItems()
+        view.addSubview(picker)
+
+        nameField.placeholderString = t("fingerprint_default_name")
+        mfField.placeholderString = "750002"
+        sdField.placeholderString = "fd5a:0201"
+        uuidField.placeholderString = "fd6f"
+        for field in [nameField, mfField, sdField, uuidField] {
+            view.addSubview(field)
+        }
+
+        let hint = NSTextField(wrappingLabelWithString: t("fingerprint_hint"))
+        hint.frame = NSRect(x: 0, y: 0, width: 460, height: 42)
+        hint.font = NSFont.systemFont(ofSize: NSFont.smallSystemFontSize)
+        hint.textColor = NSColor.secondaryLabelColor
+        view.addSubview(hint)
+    }
+
+    /// Refresh the device picker every time it is opened, so devices that are
+    /// still being discovered show up without closing the dialog.
+    func menuWillOpen(_ menu: NSMenu) {
+        guard menu == picker.menu else { return }
+        rebuildPickerItems()
+    }
+
+    private func rebuildPickerItems() {
+        let previousIndex = picker.indexOfSelectedItem
+        candidates = candidatesProvider()
+        picker.removeAllItems()
+        picker.addItem(withTitle: t("fingerprint_pick_manual"))
+        for device in candidates {
+            picker.addItem(withTitle: FingerprintDialogContext.candidateTitle(device))
+        }
+        if previousIndex >= 0 && previousIndex < picker.numberOfItems {
+            picker.selectItem(at: previousIndex)
+        }
+    }
+
+    private func makeLabel(_ text: String, y: CGFloat) -> NSTextField {
+        let label = NSTextField(labelWithString: text)
+        label.frame = NSRect(x: 0, y: y + 3, width: 150, height: 20)
+        label.alignment = .right
+        label.font = NSFont.systemFont(ofSize: NSFont.smallSystemFontSize)
+        label.textColor = NSColor.secondaryLabelColor
+        return label
+    }
+
+    private static func candidateTitle(_ device: Device) -> String {
+        let name = device.currentResolvedName() ?? device.uuid.uuidString
+        var details: [String] = []
+        if let mf = device.mfDataHex, !mf.isEmpty { details.append("MF:" + String(mf.prefix(6))) }
+        if let sd = device.serviceDataEntries.first, !sd.isEmpty { details.append("SD:" + String(sd.prefix(8))) }
+        let suffix = details.isEmpty ? "" : " [" + details.joined(separator: " ") + "]"
+        return String(format: "%@ (%ddBm)%@", name, device.rssi, suffix)
+    }
+
+    @objc private func pickerChanged(_ sender: NSPopUpButton) {
+        let index = sender.indexOfSelectedItem - 1
+        guard index >= 0, index < candidates.count else { return }
+        let device = candidates[index]
+        if nameField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+           let name = device.currentResolvedName(), !name.isEmpty {
+            nameField.stringValue = name
+        }
+        var suggestedCriteria = false
+        if let mf = device.mfDataHex, !mf.isEmpty {
+            mfField.stringValue = String(mf.prefix(6))
+            suggestedCriteria = true
+        }
+        if let sd = device.serviceDataEntries.first, !sd.isEmpty {
+            sdField.stringValue = String(sd.prefix(8))
+            suggestedCriteria = true
+        }
+        if !suggestedCriteria, uuidField.stringValue.isEmpty, let uuid = device.serviceUUIDs.first {
+            uuidField.stringValue = uuid
+        }
     }
 }
